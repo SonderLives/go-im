@@ -4,6 +4,7 @@ import (
 	"go-im/pkg/utils"
 	"log"
 	"net"
+	"sync"
 )
 
 type User struct {
@@ -11,6 +12,7 @@ type User struct {
 	Address        net.Addr
 	Connection     net.Conn
 	MessageChannel chan string
+	closeOnce      sync.Once
 }
 
 func NewUserConnect(conn net.Conn) *User {
@@ -43,11 +45,13 @@ func (user *User) ListenMessageChannel() {
 }
 
 func (user *User) Offline() {
-	err := user.Connection.Close()
-	close(user.MessageChannel)
-	if err != nil {
-		log.Println(utils.Red("[-] 关闭连接时出现错误,", err.Error()))
-	}
+	user.closeOnce.Do(func() {
+		close(user.MessageChannel)
+		err := user.Connection.Close()
+		if err != nil {
+			log.Println(utils.Red("[-] 关闭连接时出现错误,", err.Error()))
+		}
+	})
 }
 
 func (user *User) Rename(name string) {

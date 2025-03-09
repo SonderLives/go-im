@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Server struct {
@@ -67,11 +68,28 @@ func (server *Server) HandleConnect(conn net.Conn) {
 
 	// 2.广播上线消息
 	notifyMessage := fmt.Sprint("已上线~ 😘")
-	formatMessage := fmt.Sprintf("%s> %s\n", user.UserName, notifyMessage)
+	formatMessage := fmt.Sprintf("%s> %s", user.UserName, notifyMessage)
 	server.BroadcastOfficialNotify(formatMessage)
 
 	// 3.处理用户消息
-	go server.HandleMessage(user)
+	liveChannel := make(chan bool)
+	go server.HandleMessage(user, liveChannel)
+
+	for {
+		select {
+		case <-liveChannel:
+			// 不需要处理，利用select自动计算case条件,来实现自动保持持连接存活
+		case <-time.After(time.Second * 60):
+			// 超时处理：关闭连接并广播
+			user.SendMessage(fmt.Sprintf("%s 因超时下线了 ⏰", user.UserName))
+			server.OnlineMap.Delete(user.UserName)
+			// 给下线消息一定的缓冲时间，确保最后一条消息能够发送成功
+			timer := time.NewTimer(time.Second * 2)
+			<-timer.C
+			user.Offline()
+			return
+		}
+	}
 }
 
 func (server *Server) ListenMessageChannel() {
@@ -94,11 +112,11 @@ func (server *Server) Broadcast(message string) {
 }
 
 func (server *Server) BroadcastOfficialNotify(message string) {
-	officialNotifyMessage := fmt.Sprintf("%s %s\n", "[official notify]", message)
+	officialNotifyMessage := fmt.Sprintf("%s %s\n", "[official notify] ", message)
 	server.MessageChannel <- officialNotifyMessage
 }
 
-func (server *Server) HandleMessage(user *User) {
+func (server *Server) HandleMessage(user *User, liveChannel chan<- bool) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := user.Connection.Read(buf)
@@ -106,8 +124,8 @@ func (server *Server) HandleMessage(user *User) {
 		if n == 0 || err == io.EOF {
 			// 用户下线,关闭连接
 			server.OnlineMap.Delete(user.UserName)
-			formatMessage := fmt.Sprintf("%s %s> %s\n", "[official notify]", user.UserName, "下线了 😣")
-			server.MessageChannel <- formatMessage
+			formatMessage := fmt.Sprintf("%s %s\n", user.UserName, "下线了 😣")
+			server.BroadcastOfficialNotify(formatMessage)
 			user.Offline()
 			break
 		}
@@ -117,6 +135,8 @@ func (server *Server) HandleMessage(user *User) {
 			continue
 		}
 
+		// 进行保活
+		liveChannel <- true
 		// 命令解析
 		message := string(buf[:n-1])
 		if strings.HasPrefix(message, "shell") {
@@ -128,6 +148,7 @@ func (server *Server) HandleMessage(user *User) {
 			formatMessage := fmt.Sprintf("%s> %s\n", user.UserName, message)
 			server.MessageChannel <- formatMessage
 		}
+
 	}
 }
 
@@ -173,10 +194,10 @@ func (server *Server) HandleOnlineCommand(user *User) {
 	}
 
 	// 向用户发送消息
-	SendMessage(user, response)
+	user.SendMessage(response)
 }
 
-func SendMessage(user *User, message string) {
+func (user *User) SendMessage(message string) {
 	if len(message) != 0 {
 		user.MessageChannel <- message
 	}
@@ -187,7 +208,7 @@ func SendCommandError(user *User) {
 - shell online 
 - shell rename nickname
 `
-	SendMessage(user, tipString)
+	user.SendMessage(tipString)
 }
 
 func (server *Server) HandleRenameCommand(user *User, name string) {
@@ -195,7 +216,7 @@ func (server *Server) HandleRenameCommand(user *User, name string) {
 	_, ok := server.OnlineMap.Load(name)
 	if ok {
 		// 1.1 存在则返回错误
-		SendMessage(user, "[!] 用户名已存在\n")
+		user.SendMessage("[!] 用户名已存在\n")
 	} else {
 		// 1.2 不存在即可修改 user和OnlineMap
 		oldName := user.UserName
